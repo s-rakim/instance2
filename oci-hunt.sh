@@ -32,10 +32,21 @@ OCPUS="${OCPUS:-1}"
 MEM_GB="${MEM_GB:-6}"
 DISPLAY_NAME="${DISPLAY_NAME:-free-instance}"
 
-# Sleep between attempts. The launch call itself adds ~2 min on top, so the
-# real spacing is roughly MIN/MAX + 2 minutes.
+# How many attempts per day to sustain. The script measures how long each
+# launch call took and sleeps the remainder, so the rate holds steady even
+# though a capacity search can take anywhere from 1 to 4 minutes. This is the
+# knob to turn; it is what you actually care about.
+#   130/day -> an attempt every 11.1 min
+#   160/day -> every  9.0 min
+#    80/day -> every 18.0 min
+ATTEMPTS_PER_DAY="${ATTEMPTS_PER_DAY:-130}"
+
+# Used only when ATTEMPTS_PER_DAY=0, which switches back to a fixed sleep.
 MIN_SLEEP="${MIN_SLEEP:-390}"
 MAX_SLEEP="${MAX_SLEEP:-450}"
+
+# Absolute floor on the gap between attempts, whatever the pacing says.
+PACE_FLOOR="${PACE_FLOOR:-60}"
 
 # 0 = hunt forever. Anything else caps the attempts.
 MAX_TRIES="${MAX_TRIES:-0}"
@@ -186,6 +197,23 @@ api_message() {     # pull the human-readable reason out of an error body
 
 # ----------------------------------------------------------------- config
 
+# Sleep long enough that this attempt plus its wait equals one target cycle.
+# $1 = seconds the launch call just took, $2 = backoff multiplier.
+compute_nap() {
+  local call=$1 mult=$2 target nap jitter
+  if (( ATTEMPTS_PER_DAY > 0 )); then
+    target=$(( 86400 / ATTEMPTS_PER_DAY ))
+    nap=$(( target - call ))
+    jitter=$(( target / 20 ))          # +/-5%, so attempts do not land on a grid
+    (( jitter > 0 )) && nap=$(( nap - jitter + RANDOM % (2 * jitter + 1) ))
+  else
+    nap=$(( RANDOM % (MAX_SLEEP - MIN_SLEEP + 1) + MIN_SLEEP ))
+  fi
+  nap=$(( nap * mult ))
+  (( nap < PACE_FLOOR )) && nap=$PACE_FLOOR
+  printf '%s' "$nap"
+}
+
 trim() { tr -d '[:space:]' <<<"${1:-}"; }
 
 validate() {
@@ -206,6 +234,8 @@ validate() {
   done
   [[ $OCPUS  =~ ^[0-9]+$ ]] || die "OCPUS must be a whole number, got '$OCPUS'"
   [[ $MEM_GB =~ ^[0-9]+$ ]] || die "MEM_GB must be a whole number, got '$MEM_GB'"
+  [[ $ATTEMPTS_PER_DAY =~ ^[0-9]+$ ]] || die "ATTEMPTS_PER_DAY must be a whole number"
+  (( ATTEMPTS_PER_DAY <= 500 )) || die "ATTEMPTS_PER_DAY above 500 is one attempt every 3 minutes; refusing"
   (( MIN_SLEEP >= 20 )) || die "MIN_SLEEP below 20s will get you rate limited"
   (( MIN_SLEEP <= MAX_SLEEP )) || die "MIN_SLEEP is greater than MAX_SLEEP"
 
@@ -298,7 +328,11 @@ cmd_check() {
   info "shape      $SHAPE  ${OCPUS} OCPU / ${MEM_GB} GB"
   info "name       $DISPLAY_NAME"
   info "ssh key    $SSH_KEY"
-  info "pacing     ${MIN_SLEEP}-${MAX_SLEEP}s between attempts"
+  if (( ATTEMPTS_PER_DAY > 0 )); then
+    info "pacing     $ATTEMPTS_PER_DAY attempts/day -- one every $(( 86400 / ATTEMPTS_PER_DAY / 60 )) min"
+  else
+    info "pacing     fixed ${MIN_SLEEP}-${MAX_SLEEP}s between attempts"
+  fi
   info "max tries  $( ((MAX_TRIES==0)) && echo "unlimited -- hunts until it lands" || echo "$MAX_TRIES")"
 
   local ads; ads=$(list_ads) || die "could not list availability domains -- are your credentials valid?"
@@ -331,6 +365,11 @@ cmd_run() {
   ok "hunting for $SHAPE ${OCPUS}/${MEM_GB}GB as '$DISPLAY_NAME'"
   info "rotating: ${ADS[*]}"
   info "$( ((MAX_TRIES==0)) && echo "no attempt limit -- this stops when it lands" || echo "stopping after $MAX_TRIES attempts")"
+  if (( ATTEMPTS_PER_DAY > 0 )); then
+    info "pacing to $ATTEMPTS_PER_DAY attempts/day -- one every $(( 86400 / ATTEMPTS_PER_DAY / 60 )) min"
+  else
+    info "fixed sleep ${MIN_SLEEP}-${MAX_SLEEP}s between attempts"
+  fi
   discord ":mag: OCI hunt started for \`${DISPLAY_NAME}\` (${SHAPE} ${OCPUS}/${MEM_GB}GB). You will hear from me when it lands."
 
   local i=0 backoff=1 auth_fails=0 last_beat=$SECONDS
@@ -345,7 +384,9 @@ cmd_run() {
 
     ad="${ADS[$(( i++ % ${#ADS[@]} ))]}"
     ATTEMPTS=$(( ATTEMPTS + 1 ))
+    local call_started=$SECONDS
     out=$(launch "$ad")
+    local call_took=$(( SECONDS - call_started ))
 
     if grep -q '"id"' <<<"$out" && grep -qi 'ocid1.instance' <<<"$out"; then
       local iid ip ssh_line
@@ -416,8 +457,8 @@ This is not a capacity problem, so it will not clear on its own."
       discord ":hourglass_flowing_sand: Still hunting \`${DISPLAY_NAME}\` -- ${ATTEMPTS} attempts, ${MISSES} capacity misses, $(( ( $(date +%s) - STARTED ) / 3600 ))h in. No instance yet."
     fi
 
-    nap=$(( (RANDOM % (MAX_SLEEP - MIN_SLEEP + 1) + MIN_SLEEP) * backoff ))
-    info "sleeping ${nap}s"
+    nap=$(compute_nap "$call_took" "$backoff")
+    info "call took ${call_took}s, sleeping ${nap}s  (cycle $(( call_took + nap ))s)"
     sleep "$nap"
   done
 }

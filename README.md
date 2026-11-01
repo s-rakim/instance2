@@ -86,23 +86,34 @@ Default is **1 OCPU / 6 GB**, not the full 4/24. A smaller ask lands far more
 often, four of them fit inside the same free allowance, and an `A1.Flex`
 instance can be resized afterwards. Take the small one and grow it.
 
+## Pacing
+
+Set `ATTEMPTS_PER_DAY` and the script holds that rate. It times each launch
+call and sleeps the remainder, so the spacing stays honest whether a capacity
+search returns in one minute or four. Default is **130/day** — one attempt
+every 11 minutes.
+
+Measured across call durations from 60s to 360s, the realised rate stays at
+130/day; when a call is slower than the whole cycle the script errs under
+rather than over. A 5% jitter keeps attempts off a fixed grid, and a rate-limit
+response multiplies the wait rather than fighting it.
+
 ## On how hard to push
 
 Rate limiting is not the real hazard. Oracle has flagged accounts and zeroed
-their service limits based on *cumulative* volume, at intervals as gentle as
-ten minutes sustained over months —
+their service limits on *cumulative* volume, at intervals as gentle as ten
+minutes sustained over months —
 [oracle-freetier-instance-creation#75](https://github.com/mohankumarpaluru/oracle-freetier-instance-creation/issues/75).
-Running this 24/7 at the default is roughly 160 attempts a day, which is above
-that case. `oci-hunt.env.example` lists gentler settings and what each costs
-you in coverage.
+That case works out at roughly 144 attempts a day. The 130 default sits just
+below it. Higher is your call; it is simply the number to be deliberate about.
 
 The lever that actually helps is **upgrading the account to Pay As You Go**.
-It reportedly improves capacity access, exempts you from idle reclamation, and
+It reportedly improves capacity access, exempts you from idle reclamation and
 removes the trial expiry — and Always Free resources stay free on PAYG. If you
-are going to change one thing, change that rather than the sleep interval.
+change one thing, change that rather than this number.
 
-Oracle publishes no policy on any of this. Decide knowing what is documented
-and what is only widely reported.
+Oracle publishes no policy on any of it. Decide knowing what is documented and
+what is only widely reported.
 
 ## Requirements
 
