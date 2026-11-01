@@ -1,0 +1,5 @@
+oci-hunt.env
+*.log
+*.pem
+id_rsa*
+.oci/

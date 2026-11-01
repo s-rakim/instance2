@@ -1,0 +1,56 @@
+# Hunts 24/7 until an instance lands, then stops.
+#
+# This needs a machine that is always on. GitHub Actions cannot do it: a job is
+# capped at 6 hours, scheduled runs get dropped under load, and schedules are
+# disabled after 60 days of repository inactivity. A small always-on host has
+# none of those limits.
+#
+# Free hosts that work well: a Google Cloud always-free e2-micro (free forever,
+# always on, 1 GB is ample for a bash loop), a Raspberry Pi, or an old laptop.
+#
+# Setup, as your normal user (not root):
+#
+#   git clone https://github.com/s-rakim/instance2 ~/oci-hunt
+#   # install the OCI CLI, then:  oci setup config
+#   mkdir -p ~/.config
+#   cp ~/oci-hunt/oci-hunt.env.example ~/.config/oci-hunt.env
+#   chmod 600 ~/.config/oci-hunt.env
+#   $EDITOR ~/.config/oci-hunt.env          # fill in the OCIDs
+#   ~/oci-hunt/oci-hunt.sh check            # verify before committing to it
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/oci-hunt/oci-hunt.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now oci-hunt
+#   loginctl enable-linger $USER            # keeps running after you log out
+#
+#   journalctl --user -u oci-hunt -f        # watch it
+#   systemctl --user stop oci-hunt          # stop it
+
+[Unit]
+Description=Oracle Always Free instance hunter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/oci-hunt
+EnvironmentFile=%h/.config/oci-hunt.env
+ExecStart=%h/oci-hunt/oci-hunt.sh run
+
+# Exit 0 means an instance landed, or one already existed. Restarting then
+# would hammer the API forever after the hunt is already won, so restart only
+# on failure -- which covers a crash, an OOM kill, or the host rebooting.
+Restart=on-failure
+RestartSec=300
+
+# A transient network outage at boot should not burn through the restart
+# budget; allow plenty of retries over a long window.
+StartLimitIntervalSec=3600
+StartLimitBurst=20
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
